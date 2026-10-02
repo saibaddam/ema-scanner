@@ -1,0 +1,65 @@
+name: EMA touch scanner
+
+on:
+  schedule:
+    # Every 5 min, Mon-Fri, 13:00-21:55 UTC. Covers 8:00 AM - 4:10 PM New York
+    # in both summer and winter time; the script itself checks the real ET time.
+    - cron: "*/5 13-21 * * 1-5"
+  workflow_dispatch: {}        # "Run workflow" button for manual tests
+
+permissions:
+  contents: write              # lets the job commit data/ (levels, state, results)
+
+concurrency:
+  group: ema-scanner
+  cancel-in-progress: false    # never run two scans at once
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check New York time
+        id: gate
+        run: |
+          now=$((10#$(TZ=America/New_York date +%H%M)))
+          dow=$(TZ=America/New_York date +%u)
+          if [ "$dow" -le 5 ] && [ "$now" -ge 800 ] && [ "$now" -le 1630 ]; then
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=no" >> "$GITHUB_OUTPUT"
+            echo "Outside 8:00-16:30 ET, skipping."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'yes'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'yes'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        if: steps.gate.outputs.run == 'yes'
+        run: pip install -r requirements.txt
+
+      - name: Scan
+        if: steps.gate.outputs.run == 'yes'
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python scanner.py
+
+      - name: Save state
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          git config user.name "ema-scanner-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "No state changes."
+          else
+            git commit -m "scanner state $(TZ=America/New_York date '+%Y-%m-%d %H:%M ET')"
+            git pull --rebase
+            git push
+          fi
